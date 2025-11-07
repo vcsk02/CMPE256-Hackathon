@@ -1,0 +1,977 @@
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quanta Health</title>
+    <!-- Import Google Font "Inter" -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Import Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Import Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- Configure Tailwind to use "Inter" font and enable dark mode -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class', // <-- This enables dark mode
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    // Add dark mode prose styles
+                    typography: ({ theme }) => ({
+                        invert: {
+                            css: {
+                                '--tw-prose-body': theme('colors.gray[300]'),
+                                '--tw-prose-headings': theme('colors.gray[100]'),
+                                '--tw-prose-lead': theme('colors.gray[400]'),
+                                '--tw-prose-links': theme('colors.blue[400]'),
+                                '--tw-prose-bold': theme('colors.gray[100]'),
+                                '--tw-prose-counters': theme('colors.gray[400]'),
+                                '--tw-prose-bullets': theme('colors.gray[600]'),
+                                '--tw-prose-hr': theme('colors.gray[700]'),
+                                '--tw-prose-quotes': theme('colors.gray[100]'),
+                                '--tw-prose-quote-borders': theme('colors.gray[700]'),
+                                '--tw-prose-captions': theme('colors.gray[400]'),
+                                '--tw-prose-code': theme('colors.gray[100]'),
+                                '--tw-prose-pre-code': theme('colors.gray[300]'),
+                                '--tw-prose-pre-bg': theme('colors.gray[800]'),
+                                '--tw-prose-th-borders': theme('colors.gray[600]'),
+                                '--tw-prose-td-borders': theme('colors.gray[700]'),
+                            },
+                        },
+                    }),
+                },
+            },
+        }
+    </script>
+
+    <!-- Import Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            addDoc, 
+            updateDoc, 
+            collection, 
+            getDocs,
+            serverTimestamp,
+            setLogLevel
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { 
+            getStorage,
+            ref,
+            listAll,
+            getDownloadURL
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
+        // --- Firebase Configuration ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : { 
+                apiKey: "AIzaSyAPxZm30h8IzhIihCWLoSWlPWTb86WJJYM",
+                authDomain: "clinical-ai-assistant-c089c.firebaseapp.com",
+                projectId: "clinical-ai-assistant-c089c",
+                storageBucket: "clinical-ai-assistant-c089c.firebasestorage.app",
+                messagingSenderId: "639685814679",
+                appId: "1:639685814679:web:0f3760c3bf4739edeb7cd2",
+                measurementId: "G-T9NDMB62WW"
+              }; // Fallback for local testing
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- Firebase Initialization ---
+        let app, auth, db, storage, userId;
+        let nlqCollectionRef;
+
+        // --- RAG Data Store ---
+        let uploadedFileContent = []; // Stores text content of uploaded files
+        const stopWords = new Set(["a", "an", "the", "in", "is", "of", "to", "and", "for", "on", "with", "what", "when", "where", "who", "which", "how", "list", "all", "find", "me"]);
+
+        // --- State ---
+        let currentResponseDocId = null; // Stores the Firestore doc ID for the current query
+        let isAuthReady = false;
+        let messageHistory = []; // { id, role, content }
+        let chartInstances = []; // To hold all chart objects
+
+        // --- DOM Elements ---
+        let chatWindow, queryForm, queryInput, sendButton, analyticsButton, modal, modalContent, modalClose, modalBody;
+        let themeToggleBtn, themeIconLight, themeIconDark;
+
+        // --- Dark Mode Functions ---
+        
+        /**
+         * Toggles the theme between light and dark.
+         */
+        function toggleTheme() {
+            const isDark = document.documentElement.classList.toggle('dark');
+            localStorage.setItem('theme', isDark ? 'dark' : 'light');
+            updateThemeIcons(isDark);
+        }
+
+        /**
+         * Updates the theme toggle button icons.
+         */
+        function updateThemeIcons(isDark) {
+            if (themeIconDark && themeIconLight) {
+                themeIconDark.classList.toggle('hidden', !isDark);
+                themeIconLight.classList.toggle('hidden', isDark);
+            }
+        }
+
+        /**
+         * Initializes the theme on page load.
+         */
+        function initializeTheme() {
+            const userPreference = localStorage.getItem('theme');
+            const systemPreference = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const isDark = userPreference === 'dark' || (userPreference === null && systemPreference);
+            
+            document.documentElement.classList.toggle('dark', isDark);
+            // Icons will be updated in DOMContentLoaded
+        }
+
+        // Run theme initialization immediately to prevent FOUC (Flash of Unstyled Content)
+        initializeTheme();
+
+        // --- End Dark Mode Functions ---
+
+
+        /**
+         * Initializes Firebase app and services, and signs the user in.
+         */
+        async function initializeFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                storage = getStorage(app);
+                setLogLevel('Debug'); 
+
+                console.log("Firebase initialized. Waiting for auth...");
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        console.log("User is signed in:", user.uid);
+                        userId = user.uid;
+                        isAuthReady = true;
+                        nlqCollectionRef = collection(db, `artifacts/${appId}/public/data/nlqs`);
+                        console.log("Firestore collection path:", `artifacts/${appId}/public/data/nlqs`);
+                        loadFilesFromStorage();
+                    } else {
+                        console.log("User is not signed in. Attempting sign-in...");
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                console.log("Signing in with custom token...");
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                console.log("Signing in anonymously...");
+                                await signInAnonymously(auth);
+                            }
+                        } catch (authError) {
+                            console.error("Error during sign-in:", authError);
+                            displayMessage('system', 'Error: Could not connect to authentication services.');
+                        }
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error initializing Firebase:", e);
+                displayMessage('system', 'Error: Firebase initialization failed. Please refresh.');
+            }
+        }
+
+        /**
+         * Simple keyword-based retrieval from uploaded file content.
+         */
+        function getContextFromFiles(query) {
+            if (uploadedFileContent.length === 0) {
+                return null; 
+            }
+            const queryKeywords = query.toLowerCase().split(/\s+/)
+                .filter(word => word.length > 2 && !stopWords.has(word));
+            if (queryKeywords.length === 0) {
+                queryKeywords.push(query.toLowerCase()); 
+            }
+            let relevantContexts = [];
+            const maxContextLength = 4000; 
+            let currentContextLength = 0;
+            for (const file of uploadedFileContent) {
+                const chunks = file.content.split(/(\n\s*\n)/); 
+                for (const chunk of chunks) {
+                    const chunkLower = chunk.toLowerCase();
+                    let matchCount = 0;
+                    for (const keyword of queryKeywords) {
+                        if (chunkLower.includes(keyword)) {
+                            matchCount++;
+                        }
+                    }
+                    if (matchCount > 0) {
+                        const contextChunk = `Source: ${file.name}\nContent:\n${chunk}\n\n`;
+                        if (currentContextLength + contextChunk.length <= maxContextLength) {
+                            relevantContexts.push(contextChunk);
+                            currentContextLength += contextChunk.length;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if (currentContextLength >= maxContextLength) break;
+            }
+            if (relevantContexts.length === 0) {
+                let fallbackContext = "";
+                for(const file of uploadedFileContent) {
+                    const contextChunk = `Source: ${file.name}\nContent:\n${file.content}\n\n`;
+                     if (fallbackContext.length + contextChunk.length <= maxContextLength) {
+                         fallbackContext += contextChunk;
+                     } else {
+                         fallbackContext += contextChunk.substring(0, maxContextLength - fallbackContext.length);
+                         break;
+                     }
+                }
+                return fallbackContext;
+            }
+            return relevantContexts.join('-----------------\n');
+        }
+
+
+        /**
+         * Handles the submission of the user's query.
+         */
+        async function handleQuerySubmit(e) {
+            e.preventDefault();
+            if (!isAuthReady) {
+                console.warn("Auth not ready, delaying query.");
+                showCustomModal("Connecting to assistant...", "Please wait a moment for the connection to establish.");
+                return;
+            }
+            const query = queryInput.value.trim();
+            if (!query) return;
+            if (uploadedFileContent.length === 0) {
+                showCustomModal("No Data Loaded", "The data files could not be loaded from the cloud. Please refresh or check the console.");
+                return;
+            }
+            queryInput.value = '';
+            setLoadingState(true);
+            currentResponseDocId = null; 
+            const welcomeMessage = document.getElementById('welcome-message');
+            if (welcomeMessage) {
+                welcomeMessage.classList.add('hidden');
+            }
+            displayMessage('user', query);
+            const context = getContextFromFiles(query);
+            if (!context) {
+                 displayMessage('system', "Could not find relevant context in the loaded files. Please check your files or query.");
+                 setLoadingState(false);
+                 return;
+            }
+            console.log("Retrieved context for query:", context);
+            let savedQueryRef;
+            try {
+                savedQueryRef = await addDoc(nlqCollectionRef, {
+                    query: query,
+                    timestamp: serverTimestamp(),
+                    feedback: null,
+                    userId: userId,
+                    context: context.substring(0, 1000) 
+                });
+                currentResponseDocId = savedQueryRef.id;
+                console.log("Query saved with ID:", currentResponseDocId);
+            } catch (e) {
+                console.error("Error saving query to Firestore:", e);
+            }
+            try {
+                console.log("context:", context);
+                const response = await callGeminiAPI(query, context);
+                displayMessage('assistant', response.text, currentResponseDocId);
+            } catch (e) {
+                console.error("Error calling Gemini API:", e);
+                displayMessage('system', `Error: ${e.message}`);
+            }
+            setLoadingState(false);
+        }
+
+        /**
+         * Sets the loading state for the query input.
+         */
+        function setLoadingState(isLoading) {
+            if (isLoading) {
+                sendButton.disabled = true;
+                sendButton.innerHTML = `
+                    <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>`;
+                const loadingBubble = document.createElement('div');
+                loadingBubble.id = 'loading-bubble';
+                loadingBubble.className = 'w-full max-w-4xl mx-auto flex';
+                loadingBubble.innerHTML = `
+                    <div class="flex-shrink-0 w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center mr-3">
+                        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8L10 10H8.5L6 14H18L15.5 10H14L16 4H12Z"/><path d="M12 14v8H6.2c-1 0-1.9-.6-2.2-1.6l-1.9-6C2 14 2 13.7 2 13.3V10c0-2.2 1.8-4 4-4h12c2.2 0 4 1.8 4 4v3.3c0 .4 0 .7-.1 1.1l-1.9 6c-.3 1-1.2 1.6-2.2 1.6H12Z"/></svg>
+                    </div>
+                    <div class="p-4 rounded-lg bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 shadow-md">
+                        <div class="flex items-center space-x-2">
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse" style="animation-delay: 0s;"></div>
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse" style="animation-delay: 0.2s;"></div>
+                            <div class="w-2 h-2 bg-gray-400 rounded-full animate-pulse" style="animation-delay: 0.4s;"></div>
+                        </div>
+                    </div>
+                `;
+                chatWindow.appendChild(loadingBubble);
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            } else {
+                const loadingBubble = document.getElementById('loading-bubble');
+                if (loadingBubble) {
+                    loadingBubble.remove();
+                }
+                sendButton.disabled = false;
+                sendButton.innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="m22 2-7 20-4-9-9-4Z"/><path d="m22 2-11 11"/>
+                    </svg>`;
+            }
+        }
+
+        /**
+         * Calls the Gemini API.
+         */
+        async function callGeminiAPI(query, context, retries = 3, delay = 1000) {
+            const apiKey = "AIzaSyCGjXkWA_s4bImVvPCBuj7kK_l_vV2dL9k"; // Will be provided by the environment
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            
+            // --- DISCLAIMER ADDED to System Prompt ---
+            const systemPrompt = `You are Quanta Health, an AI assistant for clinicians.
+- Your mission is to answer clinicians' questions with real-time, credible, machine-readable evidence BASED *ONLY* ON THE PROVIDED CONTEXT.
+- Your responses must be research-grade and explicitly grounded in the provided text.
+- Do not use any external knowledge. Do not browse the web.
+- If the information is not in the context, state that you cannot find the answer in the provided documents.
+- When asked to list studies, sites, or managers from the context, format them clearly. If possible, use tables.
+- You are helping to bridge the gap between data scarcity and clinical intelligence.
+- IMPORTANT: You are not a medical device. Your output is for informational purposes only and not a substitute for professional clinical judgment.`;
+
+            const userMessage = `
+            CONTEXT:
+            ---
+            ${context}
+            ---
+            QUESTION:
+            ${query}
+            Please answer the question based *only* on the context provided above.
+            `;
+            const payload = {
+                contents: [{ parts: [{ text: userMessage }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) {
+                        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                    }
+                    const result = await response.json();
+                    const candidate = result.candidates?.[0];
+                    if (candidate && candidate.content?.parts?.[0]?.text) {
+                        const text = candidate.content.parts[0].text;
+                        return { text };
+                    } else {
+                        console.warn("No valid text response in candidate:", result);
+                        throw new Error("No valid response from AI assistant.");
+                    }
+                } catch (e) {
+                    console.warn(`API call attempt ${i + 1} failed:`, e.message);
+                    if (i === retries - 1) throw e; 
+                    await new Promise(res => setTimeout(res, delay * Math.pow(2, i))); 
+                }
+            }
+        }
+
+        /**
+         * Displays a message in the chat window.
+         */
+        function displayMessage(role, content, docId = null) {
+            const messageId = `msg-${Date.now()}`;
+            messageHistory.push({ id: messageId, role, content });
+            
+            const msgWrapper = document.createElement('div');
+            msgWrapper.id = messageId;
+            
+            if (role === 'user') {
+                msgWrapper.className = 'w-full max-w-4xl mx-auto flex justify-end';
+                msgWrapper.innerHTML = `
+                    <div class="p-4 rounded-lg bg-blue-600 dark:bg-blue-700 text-white shadow-md max-w-2xl">
+                        ${content}
+                    </div>
+                    <div class="flex-shrink-0 w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center ml-3">
+                        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                    </div>
+                `;
+            } else if (role === 'assistant') {
+                msgWrapper.className = 'w-full max-w-4xl mx-auto flex';
+                msgWrapper.innerHTML = `
+                    <div class="flex-shrink-0 w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center mr-3">
+                        <svg class="w-5 h-5 text-gray-500 dark:text-gray-400" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8L10 10H8.5L6 14H18L15.5 10H14L16 4H12Z"/><path d="M12 14v8H6.2c-1 0-1.9-.6-2.2-1.6l-1.9-6C2 14 2 13.7 2 13.3V10c0-2.2 1.8-4 4-4h12c2.2 0 4 1.8 4 4v3.3c0 .4 0 .7-.1 1.1l-1.9 6c-.3 1-1.2 1.6-2.2 1.6H12Z"/></svg>
+                    </div>
+                    <div class="p-4 rounded-lg bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 shadow-md max-w-2xl">
+                        <div class="response-content prose dark:prose-invert prose-sm max-w-none text-gray-800 dark:text-gray-200">${markdownToHtml(content)}</div>
+                        ${docId ? `
+                            <div class="flex justify-end space-x-2 mt-3 pt-2 border-t dark:border-gray-600 -mb-2 -mx-4 px-4">
+                                <button data-doc-id="${docId}" data-feedback="up" title="Good response" class="feedback-btn p-1 rounded-full text-gray-400 hover:bg-green-100 dark:hover:bg-gray-600 hover:text-green-600 dark:hover:text-green-400">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pointer-events-none"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h3Z"/></svg>
+                                </button>
+                                <button data-doc-id="${docId}" data-feedback="down" title="Bad response" class="feedback-btn p-1 rounded-full text-gray-400 hover:bg-red-100 dark:hover:bg-gray-600 hover:text-red-600 dark:hover:text-red-400">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pointer-events-none"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3Z"/></svg>
+                                </button>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            } else { // System messages
+                msgWrapper.className = 'w-full max-w-4xl mx-auto';
+                msgWrapper.innerHTML = `
+                    <div class="p-4 rounded-lg bg-red-100 dark:bg-red-900 dark:text-red-100 text-red-900 text-center text-sm">
+                        ${content}
+                    </div>
+                `;
+            }
+
+            chatWindow.appendChild(msgWrapper);
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+        /**
+         * Simple Markdown to HTML converter.
+         */
+        function markdownToHtml(md) {
+            let html = md;
+            
+            // Tables
+            html = html.replace(/\|(.+)\|\n\|([\s\-:\|]+)\|\n((?:\|.*\|\n?)*)/g, (match, header, separator, body) => {
+                const headers = header.split('|').slice(1, -1).map(h => h.trim());
+                const rows = body.split('\n').filter(Boolean).map(row => row.split('|').slice(1, -1).map(cell => cell.trim()));
+                let table = '<table class="min-w-full divide-y divide-gray-300 dark:divide-gray-600 border border-gray-300 dark:border-gray-600 rounded-md my-2">';
+                table += '<thead class="bg-gray-50 dark:bg-gray-800">';
+                table += '<tr>' + headers.map(h => `<th class="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">${h}</th>`).join('') + '</tr>';
+                table += '</thead>';
+                table += '<tbody class="bg-white dark:bg-gray-700 divide-y divide-gray-200 dark:divide-gray-600">';
+                rows.forEach(row => {
+                    table += '<tr>' + row.map(cell => `<td class="px-3 py-2 whitespace-normal text-sm text-gray-700 dark:text-gray-200">${cell}</td>`).join('') + '</tr>';
+                });
+                table += '</tbody></table>';
+                return table;
+            });
+
+            // Bold
+            html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            // Italic
+            html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+            
+            // Code
+            html = html.replace(/`(.*?)`/g, '<code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-sm font-mono text-sm">$1</code>');
+            
+            // Lists
+            html = html.replace(/^\s*[\-\*]\s+(.*)/gm, '<ul class="list-disc list-outside pl-5 dark:text-gray-200"><li>$1</li></ul>');
+            
+            // Fix nested list items
+            html = html.replace(/<\/ul>\n<ul class="list-disc list-outside pl-5 dark:text-gray-200">/g, ''); 
+            
+            // Newlines
+            html = html.replace(/\n/g, '<br>');
+
+            return html;
+        }
+
+        /**
+         * Handles clicking the feedback buttons.
+         */
+        async function handleFeedbackClick(e) {
+            const button = e.target.closest('.feedback-btn');
+            if (!button || !isAuthReady) return;
+            const docId = button.dataset.docId;
+            const feedback = button.dataset.feedback;
+            if (!docId) {
+                console.error("No docId found for feedback.");
+                return;
+            }
+            try {
+                const docRef = doc(db, `artifacts/${appId}/public/data/nlqs`, docId);
+                await updateDoc(docRef, { feedback: feedback });
+                const parent = button.parentElement;
+                parent.querySelectorAll('.feedback-btn').forEach(btn => {
+                    btn.disabled = true;
+                    btn.classList.add('opacity-50', 'cursor-not-allowed');
+                });
+                
+                // --- FEEDBACK MESSAGE CHANGE HERE ---
+                if(feedback === 'up') {
+                    button.classList.remove('text-gray-400', 'hover:bg-green-100', 'dark:hover:bg-gray-600', 'hover:text-green-600', 'dark:hover:text-green-400');
+                    button.classList.add('text-green-600');
+                    showCustomModal("Feedback Received", "Thank you for your feedback!");
+                } else {
+                    button.classList.remove('text-gray-400', 'hover:bg-red-100', 'dark:hover:bg-gray-600', 'hover:text-red-600', 'dark:hover:text-red-400');
+                    button.classList.add('text-red-600');
+                    showCustomModal("Feedback Received", "Ouch, I will look into it");
+                }
+                // ------------------------------------
+
+                setTimeout(hideModal, 1500); 
+            } catch (e) {
+                console.error("Error saving feedback:", e);
+                showCustomModal("Error", "Could not save feedback. Please try again.");
+            }
+        }
+        /**
+         * Loads all .txt files from Firebase Storage into memory.
+         */
+        async function loadFilesFromStorage() {
+            const welcomeMessageText = document.getElementById('welcome-message-text');
+            console.log("Attempting to load files from Firebase Storage...");
+            try {
+                const listRef = ref(storage); 
+                const res = await listAll(listRef);
+                let filesLoaded = 0;
+                await Promise.all(res.items.map(async (itemRef) => {
+                    if (itemRef.name.toLowerCase().endsWith('.txt')) { 
+                        try {
+                            const url = await getDownloadURL(itemRef);
+                            const response = await fetch(url);
+                            if (!response.ok) {
+                                throw new Error(`Failed to fetch ${itemRef.name}: ${response.statusText}`);
+                            }
+                            const textContent = await response.text();
+                            uploadedFileContent.push({
+                                name: itemRef.name,
+                                content: textContent
+                            });
+                            filesLoaded++;
+                            console.log(`Loaded: ${itemRef.name}`);
+                        } catch (fileError) {
+                            console.error(`Error loading file ${itemRef.name}:`, fileError);
+                        }
+                    } else {
+                        console.log(`Skipping non-txt file: ${itemRef.name}`);
+                    }
+                }));
+                if (filesLoaded > 0) {
+                    console.log("All files loaded:", uploadedFileContent);
+                    if (welcomeMessageText) {
+                         // --- WELCOME MESSAGE CHANGE HERE ---
+                         welcomeMessageText.textContent = `Ask a question to begin.`;
+                    }
+                } else {
+                    console.warn("No .txt files were found or loaded from storage.");
+                    if (welcomeMessageText) {
+                         welcomeMessageText.textContent = 'No .txt data files were found in the cloud storage.';
+                    }
+                }
+            } catch (e) {
+                console.error("Error listing or loading files from storage:", e);
+                if (welcomeMessageText) {
+                    welcomeMessageText.textContent = 'Error loading data from the cloud. Please refresh.';
+                }
+                // Display error in chat
+                displayMessage('system', 'Error loading data from storage. Please check console (F12) for CORS or Storage Rules errors and refresh the page.');
+            }
+        }
+
+        // --- ANALYTICS FUNCTIONS ---
+
+        /**
+         * Fetches all query data and renders the analytics charts in the modal.
+         */
+        async function showAnalytics() {
+            if (!isAuthReady) {
+                showCustomModal("Analytics Not Ready", "Please wait for the assistant to connect.");
+                return;
+            }
+            try {
+                const querySnapshot = await getDocs(nlqCollectionRef);
+                const queries = [];
+                querySnapshot.forEach((doc) => {
+                    queries.push(doc.data()); 
+                });
+                if (queries.length === 0) {
+                    showCustomModal("NLQ Analytics", "No queries have been submitted yet.");
+                    return;
+                }
+                const analyticsData = processAnalyticsData(queries);
+                showCustomModal("NLQ Analytics", ""); 
+                renderAnalyticsCharts(analyticsData); 
+            } catch (e) {
+                console.error("Error fetching analytics:", e);
+                showCustomModal("Error", "Could not load analytics.");
+            }
+        }
+
+        /**
+         * Processes queries into datasets for all three charts.
+         */
+        function processAnalyticsData(queries) {
+            const queriesPerDay = new Map();
+            const feedbackCounts = { up: 0, down: 0, none: 0 };
+            const wordCounts = {};
+            queries.sort((a, b) => (a.timestamp ? a.timestamp.toDate() : 0) - (b.timestamp ? b.timestamp.toDate() : 0));
+            queries.forEach(query => {
+                if (query.timestamp) {
+                    const dateString = query.timestamp.toDate().toLocaleDateString('en-CA'); 
+                    queriesPerDay.set(dateString, (queriesPerDay.get(dateString) || 0) + 1);
+                }
+                if (query.feedback === 'up') {
+                    feedbackCounts.up++;
+                } else if (query.feedback === 'down') {
+                    feedbackCounts.down++;
+                } else {
+                    feedbackCounts.none++;
+                }
+                if (query.query) {
+                    const words = query.query.toLowerCase().split(/\s+/);
+                    words.forEach(word => {
+                        if (word.length > 2 && !stopWords.has(word)) {
+                            wordCounts[word] = (wordCounts[word] || 0) + 1;
+                        }
+                    });
+                }
+            });
+            const timeSeriesData = {
+                labels: Array.from(queriesPerDay.keys()),
+                data: Array.from(queriesPerDay.values())
+            };
+            const feedbackData = {
+                labels: ['Thumbs Up', 'Thumbs Down'],
+                data: [feedbackCounts.up, feedbackCounts.down]
+            };
+            const sortedWords = Object.entries(wordCounts)
+                .sort(([,a], [,b]) => b - a)
+                .slice(0, 15); 
+            const wordFrequencyData = {
+                labels: sortedWords.map(entry => entry[0]),
+                data: sortedWords.map(entry => entry[1])
+            };
+            return { timeSeriesData, feedbackData, wordFrequencyData };
+        }
+
+        /**
+         * Renders all three analytics charts in the modal.
+         */
+        function renderAnalyticsCharts(analyticsData) {
+            // --- Set Chart.js defaults for dark mode ---
+            const isDark = document.documentElement.classList.contains('dark');
+            Chart.defaults.color = isDark ? '#e5e7eb' : '#6b7280'; // gray-200 / gray-500
+            Chart.defaults.borderColor = isDark ? '#374151' : '#e5e7eb'; // gray-700 / gray-200
+            
+            modalBody.innerHTML = `
+                <div class="space-y-8">
+                    <div>
+                        <h4 class="text-lg font-semibold text-center text-gray-700 dark:text-gray-200 mb-2">Query Volume Over Time</h4>
+                        <canvas id="time-series-chart"></canvas>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+                        <div>
+                            <h4 class="text-lg font-semibold text-center text-gray-700 dark:text-gray-200 mb-2">Query Feedback</h4>
+                            <canvas id="feedback-chart" class="max-h-64 mx-auto"></canvas>
+                        </div>
+                        <div>
+                            <h4 class="text-lg font-semibold text-center text-gray-700 dark:text-gray-200 mb-2">Top Query Keywords</h4>
+                            <canvas id="word-freq-chart" class="max-h-64"></canvas>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // --- 1. Render Time Series Chart (Line) ---
+            const ctxTime = document.getElementById('time-series-chart').getContext('2d');
+            chartInstances.push(new Chart(ctxTime, {
+                type: 'line',
+                data: {
+                    labels: analyticsData.timeSeriesData.labels,
+                    datasets: [{
+                        label: 'Queries per Day',
+                        data: analyticsData.timeSeriesData.data,
+                        fill: true,
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    scales: {
+                        y: { beginAtZero: true, ticks: { stepSize: 1 } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            }));
+
+            // --- 2. Render Feedback Chart (Pie) ---
+            const ctxFeedback = document.getElementById('feedback-chart').getContext('2d');
+            chartInstances.push(new Chart(ctxFeedback, {
+                type: 'pie',
+                data: {
+                    labels: analyticsData.feedbackData.labels,
+                    datasets: [{
+                        data: analyticsData.feedbackData.data,
+                        backgroundColor: [
+                            'rgba(16, 185, 129, 0.7)', // Green
+                            'rgba(239, 68, 68, 0.7)'  // Red
+                        ],
+                        borderColor: [
+                            'rgba(16, 185, 129, 1)',
+                            'rgba(239, 68, 68, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { position: 'top' }
+                    }
+                }
+            }));
+
+            // --- 3. Render Word Frequency Chart (Bar) ---
+            const ctxWords = document.getElementById('word-freq-chart').getContext('2d');
+            chartInstances.push(new Chart(ctxWords, {
+                type: 'bar',
+                data: {
+                    labels: analyticsData.wordFrequencyData.labels,
+                    datasets: [{
+                        label: 'Word Frequency',
+                        data: analyticsData.wordFrequencyData.data,
+                        backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    indexAxis: 'y', // Horizontal bar chart
+                    responsive: true,
+                    scales: {
+                        x: { beginAtZero: true, ticks: { stepSize: 1 } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            }));
+        }
+        // --- END ANALYTICS FUNCTIONS ---
+
+
+        /**
+         * Shows a custom modal dialog.
+         */
+        function showCustomModal(title, message, isHtml = false) {
+            const modalTitle = document.getElementById('modal-title');
+            modalTitle.textContent = title;
+            if (chartInstances.length > 0) {
+                chartInstances.forEach(instance => instance.destroy());
+                chartInstances = [];
+            }
+            modalBody.innerHTML = ''; 
+            if (isHtml) {
+                modalBody.innerHTML = message;
+            } else if (message) {
+                modalBody.textContent = message;
+            }
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+        /**
+         * Hides the custom modal dialog.
+         */
+        function hideModal() {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            if (chartInstances.length > 0) {
+                chartInstances.forEach(instance => instance.destroy());
+                chartInstances = [];
+            }
+        }
+
+        // --- Event Listeners ---
+        window.addEventListener('DOMContentLoaded', () => {
+            // --- Assign DOM Elements ---
+            chatWindow = document.getElementById('chat-window');
+            queryForm = document.getElementById('query-form');
+            queryInput = document.getElementById('query-input');
+            sendButton = document.getElementById('send-button');
+            analyticsButton = document.getElementById('analytics-button');
+            modal = document.getElementById('modal');
+            modalContent = document.getElementById('modal-content');
+            modalClose = document.getElementById('modal-close');
+            modalBody = document.getElementById('modal-body'); 
+            themeToggleBtn = document.getElementById('theme-toggle-btn');
+            themeIconLight = document.getElementById('theme-icon-light');
+            themeIconDark = document.getElementById('theme-icon-dark');
+
+            // --- Initialize App ---
+            initializeFirebase();
+            
+            // --- Initialize Theme Icons ---
+            // This needs to be run *after* DOM content is loaded
+            // to ensure themeIconLight and themeIconDark are found.
+            initializeTheme();
+
+            // --- Attach Event Listeners ---
+            queryForm.addEventListener('submit', handleQuerySubmit);
+            analyticsButton.addEventListener('click', showAnalytics);
+            modalClose.addEventListener('click', hideModal);
+            themeToggleBtn.addEventListener('click', toggleTheme);
+            
+            // Event delegation for feedback buttons
+            chatWindow.addEventListener('click', handleFeedbackClick);
+        });
+
+    </script>
+    <style>
+        /* Custom scrollbar for webkit browsers */
+        #chat-window::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-window::-webkit-scrollbar-track {
+            background: #f1f5f9; /* slate-100 */
+        }
+        .dark #chat-window::-webkit-scrollbar-track {
+            background: #1f2937; /* gray-800 */
+        }
+        #chat-window::-webkit-scrollbar-thumb {
+            background: #94a3b8; /* slate-400 */
+            border-radius: 4px;
+        }
+        #chat-window::-webkit-scrollbar-thumb:hover {
+            background: #475569; /* slate-600 */
+        }
+        
+        /* Minor prose table styling override */
+        /* FIX: Apply dark mode text colors to prose children */
+        .prose.dark\:prose-invert ul {
+            color: #d1d5db; /* gray-300 */
+        }
+        
+        .prose table {
+            margin-top: 1em;
+            margin-bottom: 1em;
+        }
+        .prose th {
+            background-color: #f9fafb; /* gray-50 */
+        }
+        .dark .prose th {
+             background-color: #1f2937; /* gray-800 */
+        }
+        .prose td, .prose th {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #e5e7eb; /* gray-200 */
+        }
+        .dark .prose td, .dark .prose th {
+            border-color: #4b5563; /* gray-600 */
+        }
+    </style>
+</head>
+<!-- Added dark:bg-gray-900 -->
+<body class="bg-gray-100 dark:bg-gray-900 font-sans antialiased">
+
+    <!-- Main Application Container -->
+    <div class="flex flex-col h-screen">
+
+        <!-- Header - Added dark:bg-gray-800 dark:border-gray-700 -->
+        <header class="bg-white dark:bg-gray-800 shadow-md border-b border-gray-200 dark:border-gray-700 z-10">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center h-16">
+                    <!-- Logo/Title - Added dark:text-gray-100 -->
+                    <div class="flex items-center space-x-3"> 
+                        <svg class="h-8 w-8 text-blue-600" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.36-1.5L14 16l-3.22 3H9.5l.36-1.5-4.64-6.5Z"/></svg>
+                        <!-- NAME CHANGE -->
+                        <h1 class="text-xl font-bold text-gray-800 dark:text-gray-100">Quanta Health</h1>
+                    </div>
+                    <!-- Control Buttons - Added dark mode styles -->
+                    <div class="flex items-center space-x-2">
+                        <!-- START: New Theme Toggle Button -->
+                        <button id="theme-toggle-btn" title="Toggle theme" class="flex items-center justify-center w-10 h-10 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition duration-150">
+                            <svg id="theme-icon-light" class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                            <svg id="theme-icon-dark" class="w-5 h-5 hidden" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                        </button>
+                        <!-- END: New Theme Toggle Button -->
+                        
+                        <button id="analytics-button" title="View NLQ Analytics" class="flex items-center space-x-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition duration-150 text-sm font-medium">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 21H3V3"/><path d="M10 17V10"/><path d"M14 17V7"/><path d="M18 17V14"/></svg>
+                            <span>Analytics</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Removed File Upload Section -->
+
+        <!-- Chat Window - Added dark:bg-gray-800 -->
+        <main id="chat-window" class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 bg-slate-50 dark:bg-gray-800">
+            
+            <!-- Welcome Message - Added dark mode styles -->
+            <div id="welcome-message" class="w-full h-full flex flex-col items-center justify-center text-center p-4">
+                <div class="max-w-md">
+                    <div class="mx-auto w-16 h-16 rounded-full bg-blue-100 dark:bg-blue-900 flex items-center justify-center">
+                        <svg class="w-10 h-10 text-blue-600 dark:text-blue-300" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8L10 10H8.5L6 14H18L15.5 10H14L16 4H12Z"/><path d="M12 14v8H6.2c-1 0-1.9-.6-2.2-1.6l-1.9-6C2 14 2 13.7 2 13.3V10c0-2.2 1.8-4 4-4h12c2.2 0 4 1.8 4 4v3.3c0 .4 0 .7-.1 1.1l-1.9 6c-.3 1-1.2 1.6-2.2 1.6H12Z"/></svg>
+                    </div>
+                    <!-- NAME CHANGE -->
+                    <h2 class="mt-4 text-2xl font-semibold text-gray-800 dark:text-gray-100">Quanta Health</h2>
+                    <!-- WELCOME MESSAGE CHANGE HERE -->
+                    <p id="welcome-message-text" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                        AI Loading...
+                    </p>
+                </div>
+            </div>
+            
+            <!-- Messages will be appended here -->
+        </main>
+
+        <!-- Query Input Bar - Added dark mode styles -->
+        <footer class="bg-white dark:bg-gray-800 p-4 border-t-2 border-gray-200 dark:border-gray-700">
+            <!-- DISCLAIMER ADDED HERE -->
+            <div class="max-w-4xl mx-auto">
+                <form id="query-form" class="flex items-center space-x-3">
+                    <input type="text" id="query-input" placeholder="Ask a question based on your data..." class="flex-1 w-full px-4 py-3 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm">
+                    <button type="submit" id="send-button" class="p-3 bg-blue-600 dark:bg-blue-700 text-white rounded-lg hover:bg-blue-700 dark:hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition duration-150">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="m22 2-7 20-4-9-9-4Z"/><path d="m22 2-11 11"/>
+                        </svg>
+                    </button>
+                </form>
+                <p class="text-xs text-center text-gray-500 dark:text-gray-400 mt-3">
+                    This is not a Medical Device. For informational purposes only.
+                </p>
+            </div>
+        </footer>
+
+    </div>
+
+    <!-- Modal Dialog - Added dark mode styles -->
+    <div id="modal" class="hidden fixed inset-0 z-50 bg-gray-900 dark:bg-black bg-opacity-75 dark:bg-opacity-75 items-center justify-center p-4">
+        <div id="modal-content" class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-3xl overflow-hidden">
+            <!-- Modal Header -->
+            <div class="flex justify-between items-center p-4 border-b dark:border-gray-700">
+                <h3 id="modal-title" class="text-lg font-semibold text-gray-800 dark:text-gray-100">Modal Title</h3>
+                <button id="modal-close" class="p-1 rounded-full text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-200">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <!-- Modal Body -->
+            <div id="modal-body" class="p-6 text-sm text-gray-600 dark:text-gray-300 max-h-[70vh] overflow-y-auto">
+                <!-- Content (text or canvas) goes here -->
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
+
