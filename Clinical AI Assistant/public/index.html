@@ -74,19 +74,6 @@
             listAll,
             getDownloadURL
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
-
-        // --- Firebase Configuration ---
-        const firebaseConfig = typeof __firebase_config !== 'undefined' 
-            ? JSON.parse(__firebase_config) 
-            : { 
-                apiKey: "AIzaSyAPxZm30h8IzhIihCWLoSWlPWTb86WJJYM",
-                authDomain: "clinical-ai-assistant-c089c.firebaseapp.com",
-                projectId: "clinical-ai-assistant-c089c",
-                storageBucket: "clinical-ai-assistant-c089c.firebasestorage.app",
-                messagingSenderId: "639685814679",
-                appId: "1:639685814679:web:0f3760c3bf4739edeb7cd2",
-                measurementId: "G-T9NDMB62WW"
-              }; // Fallback for local testing
         
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
